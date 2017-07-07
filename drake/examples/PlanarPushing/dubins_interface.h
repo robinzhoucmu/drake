@@ -25,7 +25,7 @@ class DubinsPushPlanner {
   // Planer: given initial object pose to final object pose, return the 
   // object cartesian pose and the pusher cartesian pose trajectories. 
   void PlanPath(const Eigen::Vector3d cart_pose_start, 
-    const Eigen::Vector3d cart_pose_end, int num_way_points, 
+    const Eigen::Vector3d cart_pose_goal, int num_way_points, 
     Eigen::Matrix<double, Eigen::Dynamic, 3>* object_poses, 
     Eigen::Matrix<double, Eigen::Dynamic, 3>* pusher_poses);
   
@@ -41,16 +41,18 @@ class DubinsPushPlanner {
 
   void ComputeDubinsFrame();
 
+  void ComputePusherFrame();
+
   void ComputeFrictionCone();
 
 
-  // Convert flat space state and velocity to cartesian pose.
-  void FlatSpaceToCartesianSpace(const Eigen::Matrix<double, Eigen::Dynamic, 2> flat_z, 
-    const Eigen::Matrix<double, Eigen::Dynamic, 2> flat_vz,
+  // Convert flat space state and velocity to cartesian pose wrt Dubins frame.
+  void FlatSpaceToCartesianSpace(const Eigen::Matrix<double, Eigen::Dynamic, 2> 
+    flat_z, const Eigen::Matrix<double, Eigen::Dynamic, 2> flat_vz,
     Eigen::Matrix<double, Eigen::Dynamic, 3>* cartesian_poses);
 
-  // This is for converting a cartesian pose to agumented flat state.  
-  // Assuming instantaneous velocity will follow the positive local y axis.
+  // This is for converting a cartesian pose in Dubins frame to augmented flat 
+  // state. Assuming instantaneous velocity will follow the positive y axis. 
   // The third dimension in flat_augmented state denotes the heading of the head
   // point.  
   void CartesianSpaceToFlatSpace(const Eigen::Vector3d cartesian_pose, 
@@ -62,11 +64,22 @@ class DubinsPushPlanner {
     const Eigen::Vector3d flat_augmented_z_goal, const int num_way_points,
     Eigen::Matrix<double, Eigen::Dynamic, 2>* flat_traj_z);
 
-  // Given a path (length N) in flat space, map it to cartesian space (length N-1).
-  void GetCartesianPathGivenFlatOutputPath(const std::vector<double>& flat_path_x, 
-    const std::vector<double>& flat_path_y, int num_pts, 
-    std::vector<double> *cart_x, std::vector<double> *cart_y, 
-    std::vector<double>* cart_theta);
+  // Given a path (length N) in flat space, map it to cartesian space 
+  // (length N-1) in Dubins frame.
+  void GetCartesianPathGivenFlatOutputPath(
+    const Eigen::Matrix<double, Eigen::Dynamic, 2> flat_traj_z, 
+    Eigen::Matrix<double, Eigen::Dynamic, 3>* cartesian_traj);
+
+  // Helper functions.
+  Eigen::Vector3d GetDubinsPoseVectorGivenObjectPoseVector(
+    const Eigen::Vector3d pose_vector_object);
+
+  Eigen::Vector3d GetObjectPoseVectorGivenDubinsPoseVector(
+    const Eigen::Vector3d pose_vector_dubins); 
+
+  Eigen::Vector3d ConvertSE3ToPoseVector(const Eigen::Isometry2d tf);
+
+  Eigen::Isometry2d ConvertPoseVectorToSE3(const Eigen::Vector3d pose_vector); 
 
   // First 2 elements (related to Fx, Fy) of the diagonal ellipsoid limit surface.
   double ls_a_; 
@@ -88,7 +101,10 @@ class DubinsPushPlanner {
   // Right edge of the friction cone in body frame.
   Eigen::Vector2d friction_cone_right_;
 
-  // Homogeneous transform (SE(2)) of the dubins frame w.r.t the body frame. 
+  // Homogeneous transform (SE(2)) of the dubins frame w.r.t the object frame. 
+  Eigen::Isometry2d tf_dubins_frame_;
+
+  // Homogeneous transform of the pusher frame w.r.t. the object frame.
   Eigen::Isometry2d tf_pusher_frame_;
 
   // Center of rear axle w.r.t the dubins frame.

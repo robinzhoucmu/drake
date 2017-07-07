@@ -10,28 +10,24 @@ int main() {
   double ls_b = 4500;
   // Coefficient of contact friction
   double mu = 0.5;
-  Eigen::Vector2d pt(0,-1);
-  Eigen::Vector2d normal(0,1);
+  Eigen::Vector2d pt;
+  pt << 0, -0.02;
+  Eigen::Vector2d normal;
+  normal << 0, 1;
   DubinsPushPlanner planner(pt, normal, mu, ls_a, ls_b);
-  // double min_radius_turn = 0.1;
-  // planner.SetRadiusTurn(min_radius_turn);
-  // double pose_start[3] = {0,0,0};
-  // double pose_goal[3] = {0.05,0,0};
-  // std::vector<double> cart_x;
-  // std::vector<double> cart_y;
-  // std::vector<double> cart_theta;
-  // // Plan a path from start to goal. 
-  // planner.PlanPath(pose_start, pose_goal, &cart_x, &cart_y, &cart_theta);
-  // // Get the control vectors in local frames.
-  // std::vector<double> u_x;
-  // std::vector<double> u_y;
-  // planner.GetLocalFramePushVectors(cart_x, cart_y, cart_theta, &u_x, &u_y);
-  // for (uint i = 0; i < cart_x.size(); ++i) {
-  //   std::cout << cart_x[i] << "," << cart_y[i] << "," << cart_theta[i] << std::endl;
-  // }
-  // std::cout << cart_x.size() << std::endl;
-  // for (uint i = 0; i < u_x.size(); ++i) {
-  //   std::cout << u_x[i] << "," << u_y[i] << std::endl;
-  // }
-  // std::cout << u_x.size() << std::endl;
+
+  Eigen::Vector3d start_pose;
+  start_pose << 0,0,0;
+  Eigen::Vector3d goal_pose;
+  goal_pose << 0,0, M_PI / 2.0;
+  int num_way_points = 100;
+  Eigen::Matrix<double, Eigen::Dynamic, 3> object_poses; 
+  Eigen::Matrix<double, Eigen::Dynamic, 3> pusher_poses;
+  planner.PlanPath(start_pose, goal_pose, num_way_points, &object_poses, 
+    &pusher_poses);
+  for (int i = 0; i < num_way_points; ++i) {
+    std::cout << object_poses.row(i) << std::endl;
+    std::cout << pusher_poses.row(i) << std::endl;
+  }
 }
+

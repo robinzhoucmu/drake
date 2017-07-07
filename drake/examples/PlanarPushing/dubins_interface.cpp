@@ -1,6 +1,6 @@
 #include "dubins_interface.h"
 #include <limits>
-int num_segments = 1;
+int num_samples = 1;
 int ind_data = 0;
 int StoreData(double q[3], double x, void* user_data) {
   
@@ -12,7 +12,7 @@ int StoreData(double q[3], double x, void* user_data) {
   ((double*)user_data)[4 * ind_data + 2] = q[2];
   ((double*)user_data)[4 * ind_data + 3] = x; // Save distance along the path
 
-  if (++ind_data >= num_segments) // Prevent buffer overflow
+  if (++ind_data >= num_samples) // Prevent buffer overflow
     return 1; // Stop sampling
   return 0;
 }
@@ -39,14 +39,15 @@ void DubinsPushPlanner::DubinsPushPlanner::DubinsReduction() {
   ComputeFrictionCone();
   ComputeCenterOfRearAxleAndTurningRadius();
   ComputeDubinsFrame();
+  ComputePusherFrame();
 }
 
 void DubinsPushPlanner::ComputeCenterOfRearAxleAndTurningRadius() {
   // Compute distances of the line of forces to the COM. 
-  double dist_fl_to_com = abs(contact_point_(2) * friction_cone_left_(1) - 
-    contact_point_(1) * friction_cone_left_(2));
-  double dist_fr_to_com = abs(contact_point_(2) * friction_cone_right_(1) - 
-    contact_point_(1) * friction_cone_right_(2));
+  double dist_fl_to_com = std::abs(contact_point_(1) * friction_cone_left_(0) - 
+    contact_point_(0) * friction_cone_left_(1));
+  double dist_fr_to_com = std::abs(contact_point_(1) * friction_cone_right_(0) - 
+    contact_point_(0) * friction_cone_right_(1));
   
   // The distance of the line of CORs to COM is inverse proportion to the 
   // distance from the contact point to COM. 
@@ -65,16 +66,24 @@ void DubinsPushPlanner::ComputeCenterOfRearAxleAndTurningRadius() {
   center_rear_axle_(1) = dist_line_to_com;
 
   r_turn_ = (cor_fl_dx - cor_fr_dx) / 2.0;
-
+ 
 }
 
 void DubinsPushPlanner::ComputeDubinsFrame() {
   // The dubins push frame (rc_x, rc_y, theta): origin -> center of rear axle
   // +y axis -> the vector pointing from the contact point to COM.
-  double angle_frame = atan2(contact_point_(1), -contact_point_(2));
+  double angle_frame = atan2(contact_point_(0), -contact_point_(1));
   Eigen::Rotation2D<double> rotmat(angle_frame); 
-  tf_pusher_frame_.linear() = rotmat.toRotationMatrix();
-  tf_pusher_frame_.translation() = rotmat * center_rear_axle_;
+  tf_dubins_frame_.linear() = rotmat.toRotationMatrix();
+  tf_dubins_frame_.translation() = rotmat * center_rear_axle_;
+}
+
+void DubinsPushPlanner::ComputePusherFrame() {
+  // The pusher frame's y axis is aligned with the inward contact normal.
+  double angle_frame = atan2(-contact_normal_(0), contact_normal_(1));
+  tf_pusher_frame_.linear() = 
+    Eigen::Rotation2D<double>(angle_frame).toRotationMatrix();
+  tf_pusher_frame_.translation() = contact_point_;
 }
 
 void DubinsPushPlanner::ComputeFrictionCone() {
@@ -85,6 +94,31 @@ void DubinsPushPlanner::ComputeFrictionCone() {
   friction_cone_right_ = rotmat_r * contact_normal_;
 }
 
+void DubinsPushPlanner::FlatSpaceToCartesianSpace(
+  const Eigen::Matrix<double, Eigen::Dynamic, 2> flat_z, 
+  const Eigen::Matrix<double, Eigen::Dynamic, 2> flat_vz,
+  Eigen::Matrix<double, Eigen::Dynamic, 3>* cartesian_poses) {
+  
+  int num_points = flat_z.rows(); 
+  cartesian_poses->resize(num_points, 3);
+  
+  cartesian_poses->col(0) = flat_z.col(0);
+  cartesian_poses->col(1) = flat_z.col(1);
+  
+  for (int i = 0; i < num_points; ++i) {
+      (*cartesian_poses)(i, 2) = atan2(-flat_vz(i, 0), flat_vz(i, 1)); 
+  }
+
+}
+
+void DubinsPushPlanner::CartesianSpaceToFlatSpace(const Eigen::Vector3d 
+  cartesian_pose, Eigen::Vector3d* flat_augmented_z) {
+  (*flat_augmented_z)(0) = cartesian_pose(0);
+  (*flat_augmented_z)(1) = cartesian_pose(1);
+  (*flat_augmented_z)(2) = fmod(cartesian_pose(2) + M_PI / 2.0 + 
+    2 * M_PI, 2 * M_PI);
+}
+
 
 void DubinsPushPlanner::GetDubinsPathFlatOutput(const Eigen::Vector3d 
   flat_augmented_z_start, const Eigen::Vector3d flat_augmented_z_goal, 
@@ -92,22 +126,27 @@ void DubinsPushPlanner::GetDubinsPathFlatOutput(const Eigen::Vector3d
   
   DubinsPath path;
   // Call third party dubins curve generator. Return a path structure.
-  dubins_init(flat_augmented_z_start.data(), flat_augmented_z_goal.data(), 
-    r_turn_, &path);
+  double start[3];
+  double goal[3];
+  for (int i = 0; i < 3; ++i)
+  {
+    start[i] = flat_augmented_z_start(i);
+    goal[i] = flat_augmented_z_goal(i);
+  }
+  dubins_init(start, goal, r_turn_, &path);
   // Get path length to determine the sampling segment length.
   double path_length = dubins_path_length(&path);
-
   int num_segments = num_way_points - 1;
   double step_size = path_length / num_segments;
-  
   // Create output array.
   double* output_z = new double[4*num_segments];
-  
+  // Set global variable number of samples. 
+  num_samples = num_segments;
   dubins_path_sample_many(&path, StoreData, step_size, output_z);
   
   // Extract from output_z. 
-  flat_traj_z->resize(num_segments + 1, 2);
-  for (int i = 0; i<num_segments; ++i) {
+  flat_traj_z->resize(num_way_points, 2);
+  for (int i = 0; i < num_segments; ++i) {
     (*flat_traj_z)(i, 0) = *(output_z + 4 * i);
     (*flat_traj_z)(i, 1) = *(output_z + 4 * i + 1);
    }
@@ -118,76 +157,96 @@ void DubinsPushPlanner::GetDubinsPathFlatOutput(const Eigen::Vector3d
   (*flat_traj_z)(num_segments, 1) = flat_augmented_z_goal(1); 
 }
 
-// // Given a path in flat space, map it to cartesian space.
-// void DubinsPushPlanner::GetCartesianPathGivenFlatOutputPath(const std::vector<double>& flat_path_x, const std::vector<double>& flat_path_y, int num_pts, std::vector<double> *cart_x, std::vector<double> *cart_y, std::vector<double>* cart_theta) { 
-//   double dt = 1.0 / num_pts;
-//   // Starting from the second point, use difference w.r.t. previous point.
-//   for (int i = 1; i < num_pts; ++i) {
-//     double v_zx = (flat_path_x[i] - flat_path_x[i-1]) / dt;
-//     double v_zy = (flat_path_y[i] - flat_path_y[i-1]) / dt;
-//     double x,y,theta;
-//     FlatSpaceToCartesianSpace(flat_path_x[i], v_zx, flat_path_y[i], v_zy, &x, &y, &theta);    
-//     cart_x->push_back(x);
-//     cart_y->push_back(y);
-//     cart_theta->push_back(theta);
-//   }
-// }
+void DubinsPushPlanner::GetCartesianPathGivenFlatOutputPath(
+  const Eigen::Matrix<double, Eigen::Dynamic, 2> flat_traj_z, 
+  Eigen::Matrix<double, Eigen::Dynamic, 3>* cartesian_traj) {
+  const int num_points = flat_traj_z.rows();
+  // Assume the entire trajectory takes 1 second. The exact number does not 
+  // matter since it's quasi-static. 
+  double dt = 1.0 / num_points;
+  //Eigen::Matrix<double, num_points-1, 2> flat_traj_vz;
+  Eigen::MatrixXd flat_traj_vz(num_points-1, 2);
+  // Compute the velocities through first order finite difference. 
+  for (int i = 1; i < num_points; ++i) {
+    flat_traj_vz.row(i-1) = (flat_traj_z.row(i) - flat_traj_z.row(i-1)) / dt;
+  }
 
-// // Plan a path from cartesian starting pose to cartesian end pose. 
-// void DubinsPushPlanner::PlanPath(double cart_pose_start[3], double cart_pose_goal[3], std::vector<double> *cart_x, std::vector<double> *cart_y, std::vector<double>* cart_theta) {
-//   double flat_pose_start[3];
-//   double flat_pose_goal[3];
-//   // Convert start and goal to flat space.
-//   CartesianSpaceToFlatSpace(cart_pose_start[0], cart_pose_start[1], cart_pose_start[2], &flat_pose_start[0], &flat_pose_start[1], &flat_pose_start[2]);
-//   CartesianSpaceToFlatSpace(cart_pose_goal[0], cart_pose_goal[1], cart_pose_goal[2], &flat_pose_goal[0], &flat_pose_goal[1], &flat_pose_goal[2]);
+  cartesian_traj->resize(num_points - 1, 3);
+  FlatSpaceToCartesianSpace(flat_traj_z.topRows(num_points - 1), flat_traj_vz, 
+    cartesian_traj);
+}
+
+void DubinsPushPlanner::PlanPath(const Eigen::Vector3d cart_pose_start, 
+  const Eigen::Vector3d cart_pose_goal, int num_way_points, 
+  Eigen::Matrix<double, Eigen::Dynamic, 3>* object_poses, 
+  Eigen::Matrix<double, Eigen::Dynamic, 3>* pusher_poses) {
+
+  // Compute the dubins frame pose vectors given the object frame pose vectors. 
+  Eigen::Vector3d cart_pose_start_dubins = 
+    GetDubinsPoseVectorGivenObjectPoseVector(cart_pose_start);
+  Eigen::Vector3d cart_pose_goal_dubins = 
+    GetDubinsPoseVectorGivenObjectPoseVector(cart_pose_goal);
+  // Get the corresponding augmented state in flat space.
+  Eigen::Vector3d flat_z_start;
+  Eigen::Vector3d flat_z_goal;
+  CartesianSpaceToFlatSpace(cart_pose_start_dubins, &flat_z_start);
+  CartesianSpaceToFlatSpace(cart_pose_goal_dubins, &flat_z_goal);
   
-//   // Get the planning result in flat space.
-//   std::vector<double> flat_path_x;
-//   std::vector<double> flat_path_y;
-//   GetDubinsPathFlatOutput(flat_pose_start, flat_pose_goal, &flat_path_x, &flat_path_y);
+  Eigen::Matrix<double, Eigen::Dynamic, 2> flat_z_traj;
+  // Generate Dubins curve in flat space. 
+  GetDubinsPathFlatOutput(flat_z_start, flat_z_goal, num_way_points, 
+    &flat_z_traj);
   
-//   int num_pts = flat_path_x.size();
-//   // Push in the start pose at the first element. 
-//   cart_x->push_back(cart_pose_start[0]);
-//   cart_y->push_back(cart_pose_start[1]);
-//   cart_theta->push_back(cart_pose_start[2]);
-//   // Convert the flat space output to cartesian space.
-//   GetCartesianPathGivenFlatOutputPath(flat_path_x, flat_path_y, num_pts, cart_x, cart_y, cart_theta);
-// }
+  Eigen::Matrix<double, Eigen::Dynamic, 3> cartesian_dubins_traj;
+  // Map the flat space trajectory back to cartesian space (dubins frame). 
+  GetCartesianPathGivenFlatOutputPath(flat_z_traj, &cartesian_dubins_traj);
 
-// // Get the pushing point vectors from the cartesian path of the object pose. 
-// void DubinsPushPlanner::GetLocalFramePushVectors(const std::vector<double> & cart_x, const std::vector<double> & cart_y, const std::vector<double>& cart_theta, std::vector<double> *push_vec_x, std::vector<double> *push_vec_y) {
-//   for (uint i = 0; i < cart_x.size() - 1; ++i) {
-//     double theta = cart_theta[i];
-//     // Global frame.
-//     double pt_x = -sin(cart_theta[i]) * (-dist_r) + cart_x[i];
-//     double pt_y = cos(cart_theta[i]) * (-dist_r) + cart_y[i];
-//     double pt_x_nxt = -sin(cart_theta[i+1]) * (-dist_r) + cart_x[i+1];
-//     double pt_y_nxt = cos(cart_theta[i+1]) * (-dist_r) + cart_y[i+1];
-//     double delta_pt_x = pt_x_nxt - pt_x;
-//     double delta_pt_y = pt_y_nxt - pt_y;
-//     // Convert to local frame.
-//     double u_x = cos(theta) * delta_pt_x + sin(theta) * delta_pt_y;
-//     double u_y = -sin(theta) * delta_pt_x + cos(theta) * delta_pt_y;
-//     push_vec_x->push_back(u_x);
-//     push_vec_y->push_back(u_y);
-//   }
-// }
+  // Get the trajectory of object frame from the trajectory of the dubins frame.
+  object_poses->resize(num_way_points, 3);
+  pusher_poses->resize(num_way_points, 3);
+  for (int i = 0; i < num_way_points - 1; ++i) {
+    object_poses->row(i) = GetObjectPoseVectorGivenDubinsPoseVector(
+      cartesian_dubins_traj.row(i));
+  }
+  // Add the final goal pose.
+  object_poses->row(num_way_points - 1) = cart_pose_goal;   
+  // Compute the pusher pose. 
+  for (int i = 0; i < num_way_points; ++i) {
+    Eigen::Isometry2d tf_pusher = 
+      ConvertPoseVectorToSE3(object_poses->row(i)) * tf_pusher_frame_;
+    pusher_poses->row(i) = ConvertSE3ToPoseVector(tf_pusher);
+  }
+}
+ 
+Eigen::Vector3d DubinsPushPlanner::GetDubinsPoseVectorGivenObjectPoseVector(
+    const Eigen::Vector3d pose_vector_object) {
+  Eigen::Isometry2d tf_object = ConvertPoseVectorToSE3(pose_vector_object);
+  Eigen::Isometry2d tf_dubins = tf_object * tf_dubins_frame_;
+  Eigen::Vector3d pose_vector_dubins = ConvertSE3ToPoseVector(tf_dubins);
+  return pose_vector_dubins;
+}
 
+Eigen::Vector3d DubinsPushPlanner::GetObjectPoseVectorGivenDubinsPoseVector(
+  const Eigen::Vector3d pose_vector_dubins) {
+  Eigen::Isometry2d tf_dubins = ConvertPoseVectorToSE3(pose_vector_dubins);
+  Eigen::Isometry2d tf_object = tf_dubins * tf_dubins_frame_.inverse();
+  Eigen::Vector3d pose_vector_object = ConvertSE3ToPoseVector(tf_object);
+  return pose_vector_object;
+} 
 
+Eigen::Vector3d DubinsPushPlanner::ConvertSE3ToPoseVector(
+  const Eigen::Isometry2d tf) {
+  Eigen::Vector3d pose_vector;
+  pose_vector.head(2) = tf.translation(); 
+  pose_vector(2) = atan2(tf(1,0), tf(0,0));
+  return pose_vector;
+}
 
-// void DubinsPushPlanner::FlatSpaceToCartesianSpace(double z_x, double v_zx, double z_y, double v_zy, double* x, double* y, double* theta) {
-//   *theta = atan2(-v_zx, v_zy);
-//   *x = z_x + ls_a / (ls_b * dist_r) * sin(*theta);
-//   *y = z_y - ls_a / (ls_b * dist_r) * cos(*theta);
-// }
-
-
-// void DubinsPushPlanner::CartesianSpaceToFlatSpace(double x, double y, double theta, double* z_x, double* z_y, double* z_theta) {
-//   *z_x = x + ls_a / (ls_b * dist_r) * (-sin(theta));
-//   *z_y = y + ls_a / (ls_b * dist_r) * (cos(theta));
-//   *z_theta = fmod(theta + M_PI / 2.0 + 2 * M_PI, 2 * M_PI);
-// }
-
-
+Eigen::Isometry2d DubinsPushPlanner::ConvertPoseVectorToSE3(
+  const Eigen::Vector3d pose_vector) {
+  Eigen::Isometry2d tf;
+  tf.translation() = pose_vector.head(2);
+  tf.linear() = Eigen::Rotation2D<double>(pose_vector(2)).toRotationMatrix();
+  return tf;
+} 
 
