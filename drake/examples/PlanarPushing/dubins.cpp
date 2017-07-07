@@ -112,7 +112,7 @@ int dubins_init_normalised( double alpha, double beta, double d, DubinsPath* pat
     return EDUBOK;
 }
 
-int dubins_init( double q0[3], double q1[3], double rho, DubinsPath* path )
+int dubins_init(const double q0[3], const double q1[3], double rho, DubinsPath* path )
 {
     int i;
     double dx = q1[0] - q0[0];
